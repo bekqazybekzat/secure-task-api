@@ -1,0 +1,15 @@
+[bandit]
+# Scan all Python files recursively
+targets = app/
+
+# Minimum severity to report: LOW, MEDIUM, HIGH
+severity = MEDIUM
+
+# Minimum confidence to report: LOW, MEDIUM, HIGH
+confidence = MEDIUM
+
+# Tests to skip (none skipped – we want full coverage)
+# skips =
+
+# Tests to run explicitly (empty = run all)
+# tests =

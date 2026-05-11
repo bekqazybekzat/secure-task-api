@@ -1,0 +1,286 @@
+name: CI/CD Pipeline – SecureTaskAPI
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main"]
+
+env:
+  PYTHON_VERSION: "3.12"
+  APP_VERSION: ${{ github.sha }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 1 ── BUILD & LINT
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  build:
+    name: "📦 Build & Lint"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Lint with flake8
+        run: |
+          # Fail on syntax errors or undefined names
+          flake8 app/ --count --select=E9,F63,F7,F82 --show-source --statistics
+          # Warnings (non-blocking): max line length 120
+          flake8 app/ --count --exit-zero --max-complexity=10 --max-line-length=120 --statistics
+
+      - name: Upload source as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-${{ github.sha }}
+          path: |
+            app/
+            requirements.txt
+          retention-days: 7
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 2 ── TEST
+# ─────────────────────────────────────────────────────────────────────────────
+  test:
+    name: "🧪 Unit Tests & Coverage"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ \
+            --cov=app \
+            --cov-report=xml:reports/coverage.xml \
+            --cov-report=html:reports/htmlcov \
+            --cov-report=term-missing \
+            --cov-fail-under=80 \
+            -v
+
+      - name: Upload coverage report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-${{ github.sha }}
+          path: reports/
+          retention-days: 14
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 3 ── SECURITY (DevSecOps)
+# ─────────────────────────────────────────────────────────────────────────────
+  security:
+    name: "🔒 Security Scan (SAST + Deps)"
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: "pip"
+
+      - name: Install security tools
+        run: |
+          pip install bandit pip-audit
+
+      - name: SAST – Bandit
+        # Exit code 1 = issues found → pipeline FAILS
+        run: |
+          mkdir -p reports
+          bandit -r app/ \
+            -f json \
+            -o reports/bandit-report.json \
+            --severity-level medium \
+            --confidence-level medium
+          echo "✅ Bandit SAST scan passed"
+
+      - name: Dependency audit – pip-audit
+        run: |
+          pip install -r requirements.txt
+          pip-audit \
+            --requirement requirements.txt \
+            --format json \
+            --output reports/pip-audit-report.json
+          echo "✅ pip-audit scan passed"
+
+      - name: Upload security reports
+        if: always()          # upload even on failure so we can inspect
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports-${{ github.sha }}
+          path: reports/
+          retention-days: 30
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 4 ── RELEASE (package + changelog)
+# ─────────────────────────────────────────────────────────────────────────────
+  release:
+    name: "🚀 Release – Package App"
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download source artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.sha }}
+          path: ./downloaded-source
+
+      - name: Package application
+        run: |
+          mkdir -p dist
+          tar -czf dist/secure-task-api-${{ github.sha }}.tar.gz \
+            -C downloaded-source .
+          echo "Package created:"
+          ls -lh dist/
+
+      - name: Generate release manifest
+        run: |
+          cat > dist/manifest.json << EOF
+          {
+            "app": "secure-task-api",
+            "version": "${{ env.APP_VERSION }}",
+            "branch": "${{ github.ref_name }}",
+            "commit": "${{ github.sha }}",
+            "built_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "tests_passed": true,
+            "security_passed": true
+          }
+          EOF
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-${{ github.sha }}
+          path: dist/
+          retention-days: 30
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 5 ── DEPLOY: STAGING
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: "🌿 Deploy → Staging"
+    runs-on: ubuntu-latest
+    needs: release
+    environment: staging
+    env:
+      APP_ENV: staging
+      PORT: "5000"
+      # Secrets are injected from GitHub Secrets – never hardcoded
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release package
+        uses: actions/download-artifact@v4
+        with:
+          name: release-package-${{ github.sha }}
+          path: ./dist
+
+      - name: Simulate staging deployment
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🌿 DEPLOYING TO STAGING ENVIRONMENT"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Package : dist/secure-task-api-${{ github.sha }}.tar.gz"
+          echo "  Target  : staging.secure-task-api.example.com"
+          echo "  Port    : $PORT"
+          echo "  Env     : $APP_ENV"
+          echo ""
+          echo "[deploy] Extracting package…"
+          mkdir -p staging-deploy
+          tar -xzf dist/secure-task-api-${{ github.sha }}.tar.gz -C staging-deploy
+          echo "[deploy] Installing runtime dependencies…"
+          pip install -r staging-deploy/requirements.txt -q
+          echo "[deploy] Running smoke-test (health endpoint)…"
+          cd staging-deploy && python -c "
+          import app.main as m
+          m.app.config['TESTING'] = True
+          c = m.app.test_client()
+          r = c.get('/health')
+          assert r.status_code == 200, f'Health check failed: {r.status_code}'
+          print('[deploy] ✅ Health check OK:', r.get_json())
+          "
+          echo "[deploy] ✅ Staging deployment SUCCESSFUL"
+
+      - name: Notify staging deployment
+        run: |
+          echo "::notice title=Staging Deployed::Commit ${{ github.sha }} deployed to staging"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STAGE 6 ── DEPLOY: PRODUCTION (main branch only)
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-production:
+    name: "🏭 Deploy → Production"
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    env:
+      APP_ENV: production
+      PORT: "8080"
+      SECRET_KEY: ${{ secrets.SECRET_KEY }}
+      DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download release package
+        uses: actions/download-artifact@v4
+        with:
+          name: release-package-${{ github.sha }}
+          path: ./dist
+
+      - name: Simulate production deployment
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  🏭 DEPLOYING TO PRODUCTION ENVIRONMENT"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Package : dist/secure-task-api-${{ github.sha }}.tar.gz"
+          echo "  Target  : api.secure-task-api.example.com"
+          echo "  Port    : $PORT"
+          echo "  Env     : $APP_ENV"
+          echo ""
+          echo "[deploy] Blue/green swap initiated…"
+          echo "[deploy] Draining existing connections…"
+          sleep 2
+          echo "[deploy] Starting new containers…"
+          echo "[deploy] Running health checks…"
+          mkdir -p prod-deploy
+          tar -xzf dist/secure-task-api-${{ github.sha }}.tar.gz -C prod-deploy
+          pip install -r prod-deploy/requirements.txt -q
+          cd prod-deploy && python -c "
+          import app.main as m
+          m.app.config['TESTING'] = True
+          c = m.app.test_client()
+          r = c.get('/health')
+          assert r.status_code == 200
+          print('[deploy] ✅ Production health check OK')
+          "
+          echo "[deploy] ✅ Production deployment SUCCESSFUL"
+          echo "[deploy] 📊 Metrics & logs forwarding to Grafana/Prometheus…"
+
+      - name: Notify production deployment
+        run: |
+          echo "::notice title=Production Deployed::Commit ${{ github.sha }} is live in production"
