@@ -1,8 +1,3 @@
-"""
-SecureTaskAPI - A simple REST API for task management
-Features: Task CRUD, user auth simulation, input validation
-"""
-
 import logging
 import os
 import re
@@ -11,7 +6,6 @@ from datetime import datetime
 
 from flask import Flask, jsonify, request
 
-# ── Logging setup ──────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL),
@@ -25,20 +19,14 @@ logger = logging.getLogger("secure-task-api")
 
 app = Flask(__name__)
 
-# In-memory store (simulates a DB)
 TASKS: dict = {}
 
-
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
 def _sanitize(text: str, max_len: int = 200) -> str:
-    """Strip dangerous characters and enforce length limit."""
     sanitized = re.sub(r"[<>&\"'`;]", "", str(text))
     return sanitized[:max_len]
 
 
 def _validate_task(data: dict) -> tuple[bool, str]:
-    """Return (ok, error_msg)."""
     if not data:
         return False, "Request body is required"
     title = data.get("title", "").strip()
@@ -48,8 +36,6 @@ def _validate_task(data: dict) -> tuple[bool, str]:
         return False, "Title must be ≤ 120 characters"
     return True, ""
 
-
-# ── Feature 1 – Task CRUD ──────────────────────────────────────────────────────
 
 @app.route("/tasks", methods=["GET"])
 def list_tasks():
@@ -123,8 +109,6 @@ def delete_task(task_id: str):
     return jsonify({"message": "Task deleted"}), 200
 
 
-# ── Feature 2 – Search ─────────────────────────────────────────────────────────
-
 @app.route("/tasks/search", methods=["GET"])
 def search_tasks():
     query = _sanitize(request.args.get("q", ""))
@@ -138,8 +122,6 @@ def search_tasks():
     logger.info("GET /tasks/search?q=%s – %d results", query, len(results))
     return jsonify({"results": results, "count": len(results)})
 
-
-# ── Feature 3 – Health check / metrics ────────────────────────────────────────
 
 @app.route("/health", methods=["GET"])
 def health():
@@ -155,5 +137,6 @@ def health():
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 5000))
     debug = os.getenv("APP_ENV", "development") == "development"
+    host = os.getenv("APP_HOST", "127.0.0.1")
     logger.info("Starting SecureTaskAPI on port %d (debug=%s)", port, debug)
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host=host, port=port, debug=debug)
